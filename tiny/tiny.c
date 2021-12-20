@@ -11,9 +11,13 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+// void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, char *method);
+
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+// void serve_dynamic(int fd, char *filename, char *cgiargs);
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method);
+
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 
@@ -34,7 +38,7 @@ void doit(int fd)   // fd : 연결 요청 후에 리턴받은 연결 식별자
   sscanf(buf, "%s %s %s", method, uri, version);    // 문자열에서 형식화된 데이터 읽어와서 각 변수에 맵핑
 
   // GET 요청 이외의 요청이 들어오면 함수 종료
-  if (strcasecmp(method, "GET"))    // 대소문자 구별하지 않고 문자열 비교. 리턴 값이 0이면 문자열이 같다는 뜻?
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD"))    // 대소문자 구별하지 않고 문자열 비교. 리턴 값이 0이면 문자열이 같다는 뜻. 같으면 if문을 거치치 않음
   {
     clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
     return;
@@ -60,7 +64,7 @@ void doit(int fd)   // fd : 연결 요청 후에 리턴받은 연결 식별자
       clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
       return;
     }
-    serve_static(fd, filename, sbuf.st_size);   // 정적 컨텐츠를 클라이언트에 제공
+    serve_static(fd, filename, sbuf.st_size, method);   // 정적 컨텐츠를 클라이언트에 제공
   }
 
   // S_ISREG : 정규파일이면 true
@@ -73,7 +77,7 @@ void doit(int fd)   // fd : 연결 요청 후에 리턴받은 연결 식별자
       clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program");
       return;
     }
-    serve_dynamic(fd, filename, cgiargs);
+    serve_dynamic(fd, filename, cgiargs, method);
   }
 }
 
@@ -150,7 +154,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
   }
 }
 
-void serve_static(int fd, char *filename, int filesize)
+void serve_static(int fd, char *filename, int filesize, char *method)
 {
   int srcfd;
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
@@ -167,6 +171,9 @@ void serve_static(int fd, char *filename, int filesize)
   Rio_writen(fd, buf, strlen(buf));   // fd : 서버 입장에서 클라이언트와 연결된 소켓. fd에 지금까지 버퍼에 기록한 내용을 write
   printf("Response headers:\n");
   printf("%s", buf);
+
+  if (strcasecmp(method, "HEAD") == 0)
+    return;
 
   // /* Send response body to client */
   // srcfd = Open(filename, O_RDONLY, 0);
@@ -211,7 +218,7 @@ void get_filetype(char *filename, char *filetype)
     strcpy(filetype, "text/plain");
 }
 
-void serve_dynamic(int fd, char *filename, char *cgiargs)
+void serve_dynamic(int fd, char *filename, char *cgiargs, char* method)
 {
   char buf[MAXLINE], *emptylist[] = { NULL };
 
@@ -220,6 +227,9 @@ void serve_dynamic(int fd, char *filename, char *cgiargs)
   Rio_writen(fd, buf, strlen(buf));   // 버퍼의 길이만큼 fd에 write
   sprintf(buf, "Server: Tiny Web Server\r\n");
   Rio_writen(fd, buf, strlen(buf));
+
+  if (strcasecmp(method, "HEAD") == 0)
+    return;
 
   if (Fork() == 0)    /* Child */     // serve_dynamin이 부모 프로세스, 아래 코드들이 자식 프로세스가 됨. 부모 프로세스에는 return pid, 자식 프로세스에는 return 0
   {
