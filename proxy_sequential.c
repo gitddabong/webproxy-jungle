@@ -1,4 +1,4 @@
-// Concurrent web proxy
+// Sequential caching web proxy
 // 하나의 클라이언트만 연결하는 형태.
 
 // 프록시를 왜 쓰는가? 부하를 덜어준다. 그리고 실행 중에 클라이언트 쪽 fd와 서버 쪽 fd를 켜둔 상태로 있으므로 보다 더 빠르게 전송가능
@@ -29,15 +29,13 @@ void doit(int connfd);
 void parse_uri(char *uri, char *hostname, char *path, int *port);
 void build_http_header(char *http_header, char *hostname, char *path, int port, rio_t *client_rio);
 int connect_endServer(char *hostname, int port, char *http_header);
-void *thread(void *vargsp);
 
 int main(int argc, char **argv) {
-  int listenfd, *connfd;
+  int listenfd, connfd;
   socklen_t clientlen;
   char hostname[MAXLINE], port[MAXLINE];
 
   struct sockaddr_storage clientaddr; /* generic sockaddr struct which is 28 Bytes. The same use as sockaddr */
-  pthread_t tid;
 
   if (argc != 2) {
     fprintf(stderr, "usage :%s <port> \n", argv[0]);
@@ -50,36 +48,19 @@ int main(int argc, char **argv) {
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);   // 클라이언트 주소 길이
-
-    // 네트워크 상황에 따라 Accept의 처리가 pthread_create를 돌고 나서 끝날 수도 있고, pthread_create에 도착하기 전에 끝날 수도 있다.
-    // 우리가 원하는 상황은 Accept가 pthread_create를 돌고 난 후에 끝나는 것.
-    // 만약 그 전에 끝나게 되면 분리된 두 쓰레드가 같은 connfd에 대한 처리를 하게 된다.
-    // 이렇게 되면 쓰레드를 써서 어떤 결과가 나올 지 예측할 수 없다.
-    // 이를 방지하기 위해 각각의 연결 식별자를 동적으로 할당할 필요가 있다.
-    // 단지 변수로 선언하면 여러 쓰레드가 참조하는 connfd는 하나가 되지만
-    // 동적 할당을 하게 되면 여러 쓰레드가 참조하는 connfd는 서로 다른 변수가 된다.
-
-    connfd = Malloc(sizeof(int));     // 피어 스레드 분리 시 경쟁 상태를 피하기 위한 동적 할당.
-    *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);   // listenfd와 clientaddr를 합쳐서 connfd 만들기. 연결 요청 접수
+    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);   // listenfd와 clientaddr를 합쳐서 connfd 만들기. 연결 요청 접수
 
     /* print accepted message */
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0); // 소켓 구조체를 호스트의 서비스들(문자열)로 변환
     printf("Accepted connection from (%s %s).\n", hostname, port);
 
-    Pthread_create(&tid, NULL, thread, (void *)connfd);   // 프로세스 내에서 쓰레드 만들기
+    /* sequential handle the client transaction */
+    doit(connfd);   // 트랜잭션 수행
+    Close(connfd);  // 연결 끝. 소켓 닫기.
   }
+  // printf("%s", user_agent_hdr);
   return 0;
 }
-
-void *thread(void *vargs) {
-  int connfd = *((int *)vargs);
-  Pthread_detach(pthread_self());   // 연결 가능한 스레드 tid 분리. pthread_self()를 인자로 넣으면 자신을 분리
-  Free(vargs);
-  doit(connfd);
-  Close(connfd);
-  return NULL;
-}
-
 
 /* handle the client HTTP transaction */
 void doit(int connfd) {
@@ -91,7 +72,7 @@ void doit(int connfd) {
   char hostname[MAXLINE], path[MAXLINE];
   int port;
 
-// rio의 장점? EOF를 만났을 때만 short count가 나옴을 보장함. short count : 원하는 만큼 읽겠다고 했는데 다 못 읽는 경우에 발생.
+// rio의 장점? EOF를 만났을 때 short count가 나옴을 보장함. short count : 원하는 만큼 읽겠다고 했는데 다 못 읽는 경우에 발생.
   rio_t rio, server_rio;  /* rio is client's rio, server_rio is endserver's rio */
   Rio_readinitb(&rio, connfd);    // 읽기 버퍼 초기화. rio_t 타입의 읽기 버퍼와 식별자 connfd 연결
   Rio_readlineb(&rio, buf, MAXLINE);  // 클라이언트가 보낸 요청 라인을 읽고 분석. buf에 복사
@@ -140,7 +121,7 @@ void build_http_header(char *http_header, char *hostname, char *path, int port, 
   /* request lint */
   sprintf(request_hdr, requestlint_hdr_format, path); // request_hdr에 "GET %s HTTP/1.0\r\n" 이 폼으로 경로 넣어서 저장
   /* get other request header for client rio and change it */
-  while (Rio_readlineb(client_rio, buf, MAXLINE) > 0) {   // 읽기에 성공한 경우.  client_rio : 아까 가져온 클라이언트의 읽기 버퍼. buf에 옮겨쓰기
+  while (Rio_readlineb(client_rio, buf, MAXLINE) > 0) {   // 읽기에 성공한 경우  client_rio : 아까 가져온 클라이언트의 읽기 버퍼. buf에 옮겨쓰기
     if (strcmp(buf, endof_hdr) == 0)  /* EOF */   // 종료 조건
       break;
 
@@ -166,7 +147,7 @@ void build_http_header(char *http_header, char *hostname, char *path, int port, 
 }
 
 /* Connect to the end server */
-// 엔드 서버와 연결. 여기서 엔드 서버라는 것은 tiny 서버를 말하는 것
+// 엔드 서버와 연결. 여기서 엔드 서버라는 것은 tiny 서버를 말하는 것이겠지?
 // inline 함수 : 호출하는 함수가 아닌 컴파일 시 호출부 위치에 함수 코드 자체를 복사. 호출 과정이 없어서 속도가 빠르지만 많이 사용하면 실행 코드의 크기가 커질 수 있다
 inline int connect_endServer(char *hostname, int port, char *http_header) {
   char portStr[100];
